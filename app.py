@@ -33,6 +33,10 @@ NIFTY50 = {
     "JIOFIN": 18143, "TATAMOTORS": 3456, "INDUSINDBK": 5258,
 }
 
+# Approximate Nifty 50 weights (%). Update from NSE's monthly index factsheet.
+HEAVY = {"HDFCBANK": 12.9, "ICICIBANK": 9.0, "RELIANCE": 8.1, "INFY": 4.9,
+         "BHARTIARTL": 4.7, "LT": 4.0, "ITC": 3.5, "TCS": 3.4}
+
 st.markdown("""
 <style>
 .block-container{padding-top:1.2rem;padding-bottom:3rem;max-width:560px}
@@ -44,6 +48,9 @@ st.markdown("""
 .up{color:#1aa56a}.dn{color:#e0524f}
 .pos{display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid rgba(128,128,128,.25)}
 .pos small{opacity:.6}
+div[data-testid="stHorizontalBlock"]{flex-wrap:nowrap!important;gap:.5rem!important}
+div[data-testid="stHorizontalBlock"]>div[data-testid="stColumn"],
+div[data-testid="stHorizontalBlock"]>div[data-testid="column"]{min-width:0!important;flex:1 1 0!important;width:auto!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,7 +75,7 @@ gate()
 # ---------------------------------------------------------------- token management
 @st.cache_resource
 def _store():
-    return {"token": str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
+    return {"token": str(st.secrets.get("ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
             "err": "", "renew_after": 0, "gen_after": 0}
 
 
@@ -94,7 +101,7 @@ def _totp(secret):
 
 
 def _cid():
-    return str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
+    return str(st.secrets.get("CLIENT_ID", "")).strip()
 
 
 def _renew(tok):
@@ -238,22 +245,22 @@ def cls(n):
 
 # ---------------------------------------------------------------- controls (outside the refreshing block)
 st.title("Live Desk")
-b1, b2 = st.columns(2)
-if b1.button("↻ Refresh now", use_container_width=True):
+row1 = st.columns([1.1, 1.3, 0.9])      # Index | Expiry | Centre strike, side by side
+row2 = st.columns(2)                    # Refresh | Auto-refresh
+if row2[0].button("↻ Refresh", use_container_width=True):
     quotes.clear()
     chain.clear()
     st.session_state.get("_exp", {}).pop(st.session_state.get("und", "NIFTY"), None)
-auto = b2.toggle("Auto-refresh every 10s", value=False)
-c1, c2, c3 = st.columns([1.2, 1.2, 1])
-und = c1.selectbox("Index", list(UNDS), key="und")
+auto = row2[1].toggle("Auto 10s", value=False)
+und = row1[0].selectbox("Index", list(UNDS), key="und")
 try:
     exp_list = expiries(und)
 except Exception as e:
     exp_list = []
     st.warning(f"Expiries: {e}")
-expiry = c2.selectbox("Expiry", exp_list, key="expiry") if exp_list else None
-centre = c3.number_input("Centre strike", min_value=0, value=0, step=50, key="centre",
-                         help="0 = automatic (at the money)")
+expiry = row1[1].selectbox("Expiry", exp_list, key="expiry") if exp_list else None
+centre = row1[2].number_input("Centre", min_value=0, value=0, step=50, key="centre",
+                              help="Centre strike. 0 = automatic (at the money)")
 
 
 # ---------------------------------------------------------------- live block
@@ -302,6 +309,29 @@ def desk():
         st.caption(f"{n} of {len(NIFTY50)} stocks priced" + ("" if n == len(NIFTY50) else " · check security IDs in app.py"))
     except Exception as e:
         st.warning(f"Breadth: {e}")
+
+    # Heavyweights
+    st.subheader("Top 8 heavyweights")
+    try:
+        q = (quotes().get("data") or {}).get("NSE_EQ", {})
+        rows, wsum, wmove = [], 0.0, 0.0
+        for sym, w in HEAVY.items():
+            x = q.get(str(NIFTY50[sym])) or {}
+            ltp = x.get("last_price") or 0
+            pc = (x.get("ohlc") or {}).get("close") or 0
+            pct = (ltp - pc) / pc * 100 if (ltp and pc) else 0
+            if ltp and pc:
+                wsum += w
+                wmove += w * pct
+            rows.append(f"<tr><td style='text-align:left'><b>{sym}</b></td><td>{w:.1f}%</td>"
+                        f"<td>{inr(ltp) if ltp else '–'}</td>"
+                        f"<td class='{cls(pct)}'>{pct:+.2f}%</td></tr>")
+        st.markdown("<table class='oc'><tr><th style='text-align:left'>Stock</th><th>Wt</th><th>LTP</th><th>Chg</th></tr>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
+        if wsum:
+            st.caption(f"Weighted move of these stocks: {wmove / wsum:+.2f}%  ·  weights are approximate")
+    except Exception as e:
+        st.warning(f"Heavyweights: {e}")
 
     # OI
     st.subheader("Open interest · 5 strikes each side")
