@@ -207,7 +207,10 @@ def lakh(n):
 def cls(n):
     return "up" if n > 0 else "dn" if n < 0 else ""
 
-
+@st.cache_data(ttl=10, show_spinner=False)
+def quotes():
+    return api("/marketfeed/quote", {"NSE_EQ": list(NIFTY50.values()), "IDX_I": [13, 25, 51]})
+    
 # ---------------------------------------------------------------- controls (outside the refreshing block)
 st.title("Live Desk")
 b1, b2 = st.columns(2)
@@ -232,7 +235,24 @@ centre = c3.number_input("Centre strike", min_value=0, value=0, step=50, key="ce
 def desk():
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     st.caption(f"Updated {ist:%H:%M:%S} IST" + (" · auto-refresh on" if auto else " · tap Refresh now to update"))
-
+    
+        # Index strip: Nifty 50, Bank Nifty, Sensex in one row
+    try:
+        qi = (quotes().get("data") or {}).get("IDX_I", {})
+        th, td = "<th style='text-align:center'>{}</th>", "<td style='text-align:center'><b>{}</b><br><span class='{}'>{}</span></td>"
+        heads, cells = "", ""
+        for name, sid in (("NIFTY 50", 13), ("BANK NIFTY", 25), ("SENSEX", 51)):
+            x = qi.get(str(sid)) or {}
+            ltp = x.get("last_price") or 0
+            pc = (x.get("ohlc") or {}).get("close") or 0
+            chg = (ltp - pc) if (ltp and pc) else (x.get("net_change") or 0)
+            pct = f" ({chg / pc * 100:+.2f}%)" if pc else ""
+            heads += th.format(name)
+            cells += td.format(inr(ltp), cls(chg), f"{chg:+,.2f}{pct}")
+        st.markdown(f"<table class='oc'><tr>{heads}</tr><tr>{cells}</tr></table>", unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"Indices: {e}")
+        
     # Funds
     try:
         f = api("/fundlimit")
