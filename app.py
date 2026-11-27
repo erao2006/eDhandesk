@@ -274,13 +274,15 @@ def desk():
                 continue
             a, d, u = (a + 1, d, u) if ltp > pc else (a, d + 1, u) if ltp < pc else (a, d, u + 1)
         n = a + d + u
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Advances", a)
-        m2.metric("Declines", d)
-        m3.metric("Unchanged", u)
-        m4.metric("A/D ratio", f"{a / d:.2f}" if d else ("∞" if a else "–"))
-        if n:
-            st.progress(a / n)
+        ratio = f"{a / d:.2f}" if d else ("∞" if a else "–")
+        st.markdown(
+            "<table class='oc'><tr><th style='text-align:center'>Adv</th><th style='text-align:center'>Dec</th>"
+            "<th style='text-align:center'>Unch</th><th style='text-align:center'>A/D</th></tr>"
+            f"<tr><td class='up' style='text-align:center;font-weight:700'>{a}</td>"
+            f"<td class='dn' style='text-align:center;font-weight:700'>{d}</td>"
+            f"<td style='text-align:center;font-weight:700'>{u}</td>"
+            f"<td style='text-align:center;font-weight:700'>{ratio}</td></tr></table>",
+            unsafe_allow_html=True)
         st.caption(f"{n} of {len(NIFTY50)} stocks priced" + ("" if n == len(NIFTY50) else " · check security IDs in app.py"))
     except Exception as e:
         st.warning(f"Breadth: {e}")
