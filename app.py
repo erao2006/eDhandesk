@@ -155,10 +155,27 @@ def api(path, body=None, _retry=True):
     return j
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def expiries(und):
-    j = api("/optionchain/expirylist", {"UnderlyingScrip": UNDS[und], "UnderlyingSeg": "IDX_I"})
-    return sorted(j.get("data", []))
+    """Expiry list per index, kept for an hour. After a failure (for example Dhan's
+    rate limit) it waits 30 seconds before trying again instead of retrying on every rerun."""
+    cache = st.session_state.setdefault("_exp", {})
+    ent = cache.get(und)
+    now = time.time()
+    if ent and ent["list"] and now - ent["t"] < 3600:
+        return ent["list"]
+    if ent and ent.get("fail") and now - ent["fail"] < 30:
+        if ent["list"]:
+            return ent["list"]
+        raise RuntimeError(ent["msg"] + " (waiting before retry; tap Refresh now)")
+    try:
+        j = api("/optionchain/expirylist", {"UnderlyingScrip": UNDS[und], "UnderlyingSeg": "IDX_I"})
+        lst = sorted(j.get("data", []))
+        cache[und] = {"list": lst, "t": now}
+        return lst
+    except Exception as e:
+        cache[und] = {"list": ent["list"] if ent else [], "t": ent["t"] if ent else 0,
+                      "fail": now, "msg": str(e)}
+        raise
 
 
 @st.cache_data(ttl=5, show_spinner=False)
@@ -193,6 +210,12 @@ def cls(n):
 
 # ---------------------------------------------------------------- controls (outside the refreshing block)
 st.title("Live Desk")
+b1, b2 = st.columns(2)
+if b1.button("↻ Refresh now", use_container_width=True):
+    quotes.clear()
+    chain.clear()
+    st.session_state.get("_exp", {}).pop(st.session_state.get("und", "NIFTY"), None)
+auto = b2.toggle("Auto-refresh every 10s", value=False)
 c1, c2, c3 = st.columns([1.2, 1.2, 1])
 und = c1.selectbox("Index", list(UNDS), key="und")
 try:
@@ -206,10 +229,9 @@ centre = c3.number_input("Centre strike", min_value=0, value=0, step=50, key="ce
 
 
 # ---------------------------------------------------------------- live block
-@st.fragment(run_every=10)
 def desk():
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-    st.caption(f"Updated {ist:%H:%M:%S} IST · refreshes every 10 seconds")
+    st.caption(f"Updated {ist:%H:%M:%S} IST" + (" · auto-refresh on" if auto else " · tap Refresh now to update"))
 
     # Funds
     try:
@@ -307,4 +329,4 @@ def desk():
 if not _cid():
     st.error("Add CLIENT_ID and ACCESS_TOKEN in the app's Secrets (see secrets.toml.example).")
 else:
-    desk()
+    st.fragment(run_every=10 if auto else None)(desk)()
