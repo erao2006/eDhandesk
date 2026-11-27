@@ -252,36 +252,6 @@ def desk():
         st.markdown(f"<table class='oc'><tr>{heads}</tr><tr>{cells}</tr></table>", unsafe_allow_html=True)
     except Exception as e:
         st.warning(f"Indices: {e}")
-        
-    # Funds
-    try:
-        f = api("/fundlimit")
-        st.metric("Funds available", f"₹ {inr(f.get('availabelBalance', f.get('availableBalance', 0)))}")
-        st.caption(f"Used ₹ {inr(f.get('utilizedAmount', 0))}  ·  Withdrawable ₹ {inr(f.get('withdrawableBalance', 0))}")
-    except Exception as e:
-        st.warning(f"Funds: {e}")
-
-    # Positions
-    st.subheader("Positions")
-    try:
-        pos = api("/positions")
-        pos = pos if isinstance(pos, list) else []
-        total = sum((p.get("realizedProfit") or 0) + (p.get("unrealizedProfit") or 0) for p in pos)
-        if pos:
-            st.markdown(f"Day P&L: <b class='{cls(total)}'>₹ {inr(total)}</b>", unsafe_allow_html=True)
-            rows = []
-            for p in sorted(pos, key=lambda x: x.get("netQty", 0) == 0):
-                q = p.get("netQty", 0)
-                pl = (p.get("realizedProfit") or 0) + (p.get("unrealizedProfit") or 0)
-                avg = p.get("buyAvg") if q > 0 else p.get("sellAvg")
-                state = "Closed" if q == 0 else f"{'Long' if q > 0 else 'Short'} {abs(q)} @ {inr(avg or 0)}"
-                rows.append(f"<div class='pos'><div><b>{p.get('tradingSymbol', p.get('securityId'))}</b><br>"
-                            f"<small>{state}</small></div><b class='{cls(pl)}'>{'+' if pl > 0 else ''}{inr(pl)}</b></div>")
-            st.markdown("".join(rows), unsafe_allow_html=True)
-        else:
-            st.caption("No positions today.")
-    except Exception as e:
-        st.warning(f"Positions: {e}")
 
     # Breadth
     st.subheader("Nifty 50 breadth")
@@ -346,7 +316,36 @@ def desk():
         st.caption(f"Spot {inr(spot)}  ·  Put/Call ratio for these strikes {sp / sc:.2f}" if sc else f"Spot {inr(spot)}")
     except Exception as e:
         st.warning(f"Option chain: {e}")
+    
+    # Funds
+    try:
+        f = api("/fundlimit")
+        st.metric("Funds available", f"₹ {inr(f.get('availabelBalance', f.get('availableBalance', 0)))}")
+        st.caption(f"Used ₹ {inr(f.get('utilizedAmount', 0))}  ·  Withdrawable ₹ {inr(f.get('withdrawableBalance', 0))}")
+    except Exception as e:
+        st.warning(f"Funds: {e}")
 
+    # Positions
+    st.subheader("Positions")
+    try:
+        pos = api("/positions")
+        pos = pos if isinstance(pos, list) else []
+        total = sum((p.get("realizedProfit") or 0) + (p.get("unrealizedProfit") or 0) for p in pos)
+        if pos:
+            st.markdown(f"Day P&L: <b class='{cls(total)}'>₹ {inr(total)}</b>", unsafe_allow_html=True)
+            rows = []
+            for p in sorted(pos, key=lambda x: x.get("netQty", 0) == 0):
+                q = p.get("netQty", 0)
+                pl = (p.get("realizedProfit") or 0) + (p.get("unrealizedProfit") or 0)
+                avg = p.get("buyAvg") if q > 0 else p.get("sellAvg")
+                state = "Closed" if q == 0 else f"{'Long' if q > 0 else 'Short'} {abs(q)} @ {inr(avg or 0)}"
+                rows.append(f"<div class='pos'><div><b>{p.get('tradingSymbol', p.get('securityId'))}</b><br>"
+                            f"<small>{state}</small></div><b class='{cls(pl)}'>{'+' if pl > 0 else ''}{inr(pl)}</b></div>")
+            st.markdown("".join(rows), unsafe_allow_html=True)
+        else:
+            st.caption("No positions today.")
+    except Exception as e:
+        st.warning(f"Positions: {e}")
 
 if not _cid():
     st.error("Add CLIENT_ID and ACCESS_TOKEN in the app's Secrets (see secrets.toml.example).")
