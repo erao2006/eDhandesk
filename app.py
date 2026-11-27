@@ -68,7 +68,13 @@ gate()
 # ---------------------------------------------------------------- token management
 @st.cache_resource
 def _store():
-    return {"token": str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(), "err": ""}
+    return {"token": str(st.secrets.get("ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
+            "err": "", "renew_after": 0, "gen_after": 0}
+
+
+RENEW_BELOW = 2 * 3600      # only try to renew in the last 2 hours of the 24h token
+RENEW_COOLDOWN = 15 * 60    # after a failed renew, don't try again for 15 min
+GEN_COOLDOWN = 150          # never attempt a login (TOTP) more than once per 2.5 min
 
 
 def _jwt_exp(tok):
@@ -88,7 +94,7 @@ def _totp(secret):
 
 
 def _cid():
-    return str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
+    return str(st.secrets.get("CLIENT_ID", "")).strip()
 
 
 def _renew(tok):
@@ -111,25 +117,46 @@ def _generate():
     return j["accessToken"]
 
 
-def token(force=False):
+def token(force=False, bad=None):
+    """Return a usable token. `bad` is the token the server just rejected (401)."""
     s = _store()
     with s["lock"]:
+        now = time.time()
         tok = s["token"]
-        left = _jwt_exp(tok) - time.time()
+        # Another call already replaced the rejected token: just use the new one.
+        if force and bad and tok != bad:
+            return tok
+        left = _jwt_exp(tok) - now
         valid = bool(tok) and left > 0
-        new = None
-        if valid and (force or left < 20 * 3600):          # keep the 24h token topped up
+        have_login = bool(st.secrets.get("PIN") and st.secrets.get("TOTP_SECRET"))
+
+        # Near expiry: one renew attempt, then a cooldown (success or failure).
+        if valid and not force and left < RENEW_BELOW and now >= s["renew_after"]:
+            s["renew_after"] = now + RENEW_COOLDOWN
             try:
-                new = _renew(tok)
-            except Exception:
-                new = None
-        if new is None and (not valid or force):
-            new = _generate() if (st.secrets.get("PIN") and st.secrets.get("TOTP_SECRET")) else None
-            if new is None and not valid:
-                raise RuntimeError("Token expired. Update ACCESS_TOKEN in Secrets, or add PIN and TOTP_SECRET.")
-        if new:
-            s["token"] = new
-        return s["token"]
+                s["token"] = _renew(tok)
+                s["renew_after"] = 0
+                s["err"] = ""
+                return s["token"]
+            except Exception as e:
+                s["err"] = f"Renew failed: {e}"
+
+        # Expired or rejected by the server: log in, rate-limited.
+        if (not valid or force) and have_login:
+            if now < s["gen_after"]:
+                raise RuntimeError(s["err"] or "Auto-login on cooldown, retrying shortly")
+            s["gen_after"] = now + GEN_COOLDOWN
+            try:
+                s["token"] = _generate()
+                s["err"] = ""
+                return s["token"]
+            except Exception as e:
+                s["err"] = f"Auto-login failed: {e}"
+                raise
+
+        if not valid:
+            raise RuntimeError("Token expired. Update ACCESS_TOKEN in Secrets, or add PIN and TOTP_SECRET.")
+        return tok
 
 
 # ---------------------------------------------------------------- API
@@ -148,7 +175,7 @@ def api(path, body=None, _retry=True):
     failed = (not r.ok) or (isinstance(j, dict) and (j.get("errorCode") or j.get("status") == "failed"))
     if failed:
         if _retry and (r.status_code == 401 or (isinstance(j, dict) and j.get("errorCode") in ("DH-901", "DH-902"))):
-            token(force=True)
+            token(force=True, bad=tok)
             return api(path, body, _retry=False)
         msg = (isinstance(j, dict) and (j.get("errorMessage") or j.get("message"))) or f"Request failed ({r.status_code})"
         raise RuntimeError(msg)
@@ -183,9 +210,10 @@ def chain(und, expiry):
     return api("/optionchain", {"UnderlyingScrip": UNDS[und], "UnderlyingSeg": "IDX_I", "Expiry": expiry})
 
 
-@st.cache_data(ttl=15, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def quotes():
-    return api("/marketfeed/quote", {"NSE_EQ": list(NIFTY50.values())})
+    # One call for Nifty 50 stocks (breadth) and the three indices (header row)
+    return api("/marketfeed/quote", {"NSE_EQ": list(NIFTY50.values()), "IDX_I": [13, 25, 51]})
 
 
 # ---------------------------------------------------------------- formatting
@@ -207,10 +235,7 @@ def lakh(n):
 def cls(n):
     return "up" if n > 0 else "dn" if n < 0 else ""
 
-@st.cache_data(ttl=10, show_spinner=False)
-def quotes():
-    return api("/marketfeed/quote", {"NSE_EQ": list(NIFTY50.values()), "IDX_I": [13, 25, 51]})
-    
+
 # ---------------------------------------------------------------- controls (outside the refreshing block)
 st.title("Live Desk")
 b1, b2 = st.columns(2)
@@ -235,11 +260,12 @@ centre = c3.number_input("Centre strike", min_value=0, value=0, step=50, key="ce
 def desk():
     ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
     st.caption(f"Updated {ist:%H:%M:%S} IST" + (" · auto-refresh on" if auto else " · tap Refresh now to update"))
-    
-        # Index strip: Nifty 50, Bank Nifty, Sensex in one row
+
+    # Index strip: Nifty 50, Bank Nifty, Sensex in one row
     try:
         qi = (quotes().get("data") or {}).get("IDX_I", {})
-        th, td = "<th style='text-align:center'>{}</th>", "<td style='text-align:center'><b>{}</b><br><span class='{}'>{}</span></td>"
+        th = "<th style='text-align:center'>{}</th>"
+        td = "<td style='text-align:center'><b>{}</b><br><span class='{}'>{}</span></td>"
         heads, cells = "", ""
         for name, sid in (("NIFTY 50", 13), ("BANK NIFTY", 25), ("SENSEX", 51)):
             x = qi.get(str(sid)) or {}
@@ -316,7 +342,7 @@ def desk():
         st.caption(f"Spot {inr(spot)}  ·  Put/Call ratio for these strikes {sp / sc:.2f}" if sc else f"Spot {inr(spot)}")
     except Exception as e:
         st.warning(f"Option chain: {e}")
-    
+
     # Funds
     try:
         f = api("/fundlimit")
