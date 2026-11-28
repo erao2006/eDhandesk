@@ -75,7 +75,7 @@ gate()
 # ---------------------------------------------------------------- token management
 @st.cache_resource
 def _store():
-    return {"token": str(st.secrets.get("ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
+    return {"token": str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
             "err": "", "renew_after": 0, "gen_after": 0}
 
 
@@ -101,7 +101,7 @@ def _totp(secret):
 
 
 def _cid():
-    return str(st.secrets.get("CLIENT_ID", "")).strip()
+    return str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
 
 
 def _renew(tok):
