@@ -75,7 +75,7 @@ gate()
 # ---------------------------------------------------------------- token management
 @st.cache_resource
 def _store():
-    return {"token": str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
+    return {"token": str(st.secrets.get("ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
             "err": "", "renew_after": 0, "gen_after": 0}
 
 
@@ -101,7 +101,7 @@ def _totp(secret):
 
 
 def _cid():
-    return str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
+    return str(st.secrets.get("CLIENT_ID", "")).strip()
 
 
 def _renew(tok):
@@ -250,6 +250,54 @@ def pivots(h, l, c):
     return {"R2": p + (h - l), "R1": 2 * p - l, "Pivot": p, "S1": 2 * p - h, "S2": p - (h - l)}
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def candles5(sec_id, day):
+    """Completed 5-minute candles (last few sessions) -> (list of dicts, error). Cached 20s; failures too."""
+    try:
+        end = datetime.strptime(day, "%Y-%m-%d")
+        j = api("/charts/intraday", {
+            "securityId": str(sec_id), "exchangeSegment": "IDX_I", "instrument": "INDEX",
+            "interval": "5", "oi": False,
+            "fromDate": (end - timedelta(days=5)).strftime("%Y-%m-%d") + " 09:15:00",
+            "toDate": end.strftime("%Y-%m-%d") + " 15:30:00"})
+        o, h, l, c, ts = (j.get(k) or [] for k in ("open", "high", "low", "close", "timestamp"))
+        ist, out, now = timezone(timedelta(hours=5, minutes=30)), [], time.time()
+        for i in range(len(c)):
+            t = ts[i] + (315532800 if ts[i] < 1.6e9 else 0)
+            if t + 300 > now:               # still forming: ignore
+                continue
+            out.append({"o": o[i], "h": h[i], "l": l[i], "c": c[i], "t": datetime.fromtimestamp(t, ist)})
+        return out, ("" if out else "No 5-minute candles returned.")
+    except Exception as e:
+        return [], str(e)
+
+
+def read3(cs):
+    """Rule-based read of the last 3 completed candles. Returns (score, reasons). Not a forecast."""
+    a, b, c = cs[-3:]
+    sc, why = 0, []
+    if a["c"] < b["c"] < c["c"]:
+        sc += 2; why.append("3 higher closes")
+    elif a["c"] > b["c"] > c["c"]:
+        sc -= 2; why.append("3 lower closes")
+    if b["h"] > a["h"] and c["h"] > b["h"] and b["l"] > a["l"] and c["l"] > b["l"]:
+        sc += 2; why.append("higher highs and higher lows")
+    elif b["h"] < a["h"] and c["h"] < b["h"] and b["l"] < a["l"] and c["l"] < b["l"]:
+        sc -= 2; why.append("lower highs and lower lows")
+    greens = sum(x["c"] > x["o"] for x in (a, b, c))
+    sc += greens - (3 - greens) if greens in (0, 3) else 0
+    rng = (c["h"] - c["l"]) or 1e-9
+    body = (c["c"] - c["o"]) / rng
+    if abs(body) >= 0.6:
+        sc += 1 if body > 0 else -1; why.append("last candle strong " + ("green" if body > 0 else "red"))
+    up_w, lo_w = (c["h"] - max(c["o"], c["c"])) / rng, (min(c["o"], c["c"]) - c["l"]) / rng
+    if up_w >= 0.5:
+        sc -= 1; why.append("long upper wick (selling at highs)")
+    if lo_w >= 0.5:
+        sc += 1; why.append("long lower wick (buying at lows)")
+    return sc, why or ["mixed candles, no clear pattern"]
+
+
 # ---------------------------------------------------------------- formatting
 def inr(n, d=2):
     return f"{n:,.{d}f}"
@@ -383,6 +431,31 @@ def desk():
                    + (f"  ·  LTP {inr(ltp)}" if ltp else ""))
     except Exception as e:
         st.warning(f"Pivots: {e}")
+
+    # Last three 5-minute candles
+    st.subheader(f"5-min read · {und}")
+    try:
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        cs, err = candles5(UNDS[und], today)
+        if len(cs) < 3:
+            raise RuntimeError(err or "Need at least 3 completed candles.")
+        sc, why = read3(cs)
+        last3 = cs[-3:]
+        bias, bc = (("Bullish bias", "up") if sc >= 3 else ("Bearish bias", "dn") if sc <= -3 else ("Neutral / choppy", ""))
+        rows = []
+        for x in last3:
+            k = "up" if x["c"] > x["o"] else "dn" if x["c"] < x["o"] else ""
+            stamp = f"{x['t']:%H:%M}" + ("" if x["t"].strftime("%Y-%m-%d") == today else f" {x['t']:%d %b}")
+            rows.append(f"<tr><td class='k'>{stamp}</td><td>{inr(x['o'])}</td><td>{inr(x['h'])}</td>"
+                        f"<td>{inr(x['l'])}</td><td class='{k}'><b>{inr(x['c'])}</b></td></tr>")
+        st.markdown("<table class='oc'><tr><th style='text-align:center'>Time</th><th>O</th><th>H</th><th>L</th><th>C</th></tr>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
+        hi, lo = max(x["h"] for x in last3), min(x["l"] for x in last3)
+        st.markdown(f"<b class='{bc}'>{bias}</b> (score {sc:+d}) · " + ", ".join(why), unsafe_allow_html=True)
+        st.caption(f"Above {inr(hi)} (3-candle high) the up-move is confirmed; below {inr(lo)} (3-candle low) it fails. "
+                   "Rule-based read of price action, not a forecast; unreliable in sideways markets.")
+    except Exception as e:
+        st.warning(f"5-min candles: {e}")
 
     # OI
     st.subheader("Open interest · 5 strikes each side")
