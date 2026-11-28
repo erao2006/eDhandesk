@@ -75,7 +75,7 @@ gate()
 # ---------------------------------------------------------------- token management
 @st.cache_resource
 def _store():
-    return {"token": str(st.secrets.get("DHAN_ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
+    return {"token": str(st.secrets.get("ACCESS_TOKEN", "")).strip(), "lock": threading.Lock(),
             "err": "", "renew_after": 0, "gen_after": 0}
 
 
@@ -101,7 +101,7 @@ def _totp(secret):
 
 
 def _cid():
-    return str(st.secrets.get("DHAN_CLIENT_ID", "")).strip()
+    return str(st.secrets.get("CLIENT_ID", "")).strip()
 
 
 def _renew(tok):
@@ -223,6 +223,33 @@ def quotes():
     return api("/marketfeed/quote", {"NSE_EQ": list(NIFTY50.values()), "IDX_I": [13, 25, 51]})
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def prev_day(sec_id, day):
+    """Previous trading day's High/Low/Close from Dhan daily candles. `day` (today, IST) only keys the cache.
+    Returns (data, error); a failure is cached for 15 min so the 10s refresh doesn't hammer the API."""
+    try:
+        end = datetime.strptime(day, "%Y-%m-%d")
+        j = api("/charts/historical", {
+            "securityId": str(sec_id), "exchangeSegment": "IDX_I", "instrument": "INDEX",
+            "expiryCode": 0, "oi": False,
+            "fromDate": (end - timedelta(days=12)).strftime("%Y-%m-%d"),
+            "toDate": (end + timedelta(days=1)).strftime("%Y-%m-%d")})
+        hi, lo, cl, ts = j.get("high") or [], j.get("low") or [], j.get("close") or [], j.get("timestamp") or []
+        ist = timezone(timedelta(hours=5, minutes=30))
+        for i in range(len(cl) - 1, -1, -1):
+            t = ts[i] + (315532800 if ts[i] < 1.6e9 else 0)   # some Dhan responses count from 1980
+            if datetime.fromtimestamp(t, ist).strftime("%Y-%m-%d") < day:
+                return {"h": hi[i], "l": lo[i], "c": cl[i], "d": datetime.fromtimestamp(t, ist).strftime("%d %b")}, ""
+        return None, "No earlier daily candle returned."
+    except Exception as e:
+        return None, str(e)
+
+
+def pivots(h, l, c):
+    p = (h + l + c) / 3
+    return {"R2": p + (h - l), "R1": 2 * p - l, "Pivot": p, "S1": 2 * p - h, "S2": p - (h - l)}
+
+
 # ---------------------------------------------------------------- formatting
 def inr(n, d=2):
     return f"{n:,.{d}f}"
@@ -332,6 +359,30 @@ def desk():
             st.caption(f"Weighted move of these stocks: {wmove / wsum:+.2f}%  ·  weights are approximate")
     except Exception as e:
         st.warning(f"Heavyweights: {e}")
+
+    # Pivot levels (classic) for the selected index
+    st.subheader(f"Pivot levels · {und}")
+    try:
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        pd_, err = prev_day(UNDS[und], today)
+        if not pd_:
+            raise RuntimeError(err or "No data")
+        lv = pivots(pd_["h"], pd_["l"], pd_["c"])
+        x = ((quotes().get("data") or {}).get("IDX_I", {})).get(str(UNDS[und])) or {}
+        ltp = x.get("last_price") or 0
+        near = min(lv, key=lambda k: abs(lv[k] - ltp)) if ltp else None
+        rows = []
+        for name, v in lv.items():
+            c_ = "up" if name.startswith("S") else "dn" if name.startswith("R") else ""
+            dist = f"{(v - ltp) / ltp * 100:+.2f}%" if ltp else "–"
+            rows.append(f"<tr class='{'atm' if name == near else ''}'><td class='k'>{name}</td>"
+                        f"<td class='{c_}'><b>{inr(v)}</b></td><td>{dist}</td></tr>")
+        st.markdown("<table class='oc'><tr><th style='text-align:center'>Level</th><th>Price</th><th>From LTP</th></tr>"
+                    + "".join(rows) + "</table>", unsafe_allow_html=True)
+        st.caption(f"From {pd_['d']}: H {inr(pd_['h'])} · L {inr(pd_['l'])} · C {inr(pd_['c'])}"
+                   + (f"  ·  LTP {inr(ltp)}" if ltp else ""))
+    except Exception as e:
+        st.warning(f"Pivots: {e}")
 
     # OI
     st.subheader("Open interest · 5 strikes each side")
